@@ -11,6 +11,7 @@ local status_component = {
 -- Configuration (user configurable via setup). Defaults: no cursor movement.
 local config = {
   auto_scroll = false, -- when true, auto-scrolls a visible window of the chat buffer
+  show_spinner_window = false, -- when true, show a floating spinner window
 }
 
 -- Session management
@@ -75,8 +76,11 @@ local function update_spinner(spinner)
 end
 
 local function open_spinner_window(spinner)
-  local win = vim.api.nvim_get_current_win()
-  local win_config = vim.api.nvim_win_get_config(win)
+  if not config.show_spinner_window then return end
+  local ok, win = pcall(vim.api.nvim_get_current_win)
+  if not ok or not win then return end
+  local ok_conf, win_config = pcall(vim.api.nvim_win_get_config, win)
+  if not ok_conf then return end
   local width = win_config.width or vim.api.nvim_win_get_width(win)
   local height = win_config.height or vim.api.nvim_win_get_height(win)
 
@@ -100,12 +104,13 @@ local function open_spinner_window(spinner)
 end
 
 local function close_spinner_window(spinner)
+  if not spinner then return end
   if spinner.win then
-    vim.api.nvim_win_close(spinner.win, true)
+    pcall(vim.api.nvim_win_close, spinner.win, true)
     spinner.win = nil
   end
   if spinner.buf then
-    vim.api.nvim_buf_delete(spinner.buf, { force = true })
+    pcall(vim.api.nvim_buf_delete, spinner.buf, { force = true })
     spinner.buf = nil
   end
 end
@@ -340,6 +345,21 @@ function M.complete_text()
       self.partial = ""
     end
     
+    -- Ensure there is a trailing USER marker so the next input is not considered assistant
+    do
+      local all_lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
+      local last_nonempty = nil
+      for i = #all_lines, 1, -1 do
+        if all_lines[i] ~= "" then
+          last_nonempty = all_lines[i]
+          break
+        end
+      end
+      if last_nonempty ~= "# === USER ===" then
+        vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, {"", "# === USER ===", ""})
+      end
+    end
+
     -- Unregister session
     active_sessions[self.id] = nil
     update_status_bar()
@@ -358,36 +378,51 @@ function M.complete_text()
   local orig_line_count = #lines
   local session = CompletionSession:new(bufnr, orig_last_line, orig_line_count)
 
-  -- Start spinner
-  session.spinner.active = true
-  open_spinner_window(session.spinner)
-  
-  -- Start spinner animation timer
-  session.spinner.timer = vim.loop.new_timer()
-  session.spinner.timer:start(
-    0,
-    80,
-    vim.schedule_wrap(function()
-      if session.spinner.active then
-        update_spinner(session.spinner)
-      else
-        if session.spinner.timer then
-          session.spinner.timer:stop()
-          session.spinner.timer = nil
+  -- Optional spinner window/animation (disabled by default)
+  session.spinner.active = config.show_spinner_window
+  if config.show_spinner_window then
+    open_spinner_window(session.spinner)
+    session.spinner.timer = vim.loop.new_timer()
+    session.spinner.timer:start(
+      0,
+      80,
+      vim.schedule_wrap(function()
+        if session.spinner.active then
+          update_spinner(session.spinner)
+        else
+          if session.spinner.timer then
+            session.spinner.timer:stop()
+            session.spinner.timer = nil
+          end
         end
-      end
-    end)
-  )
+      end)
+    )
+  end
 
-  -- Parse markdown content for delimiters
-  local content = table.concat(lines, "\n")
-  
-  -- Check if content has delimiters, if not add assistant delimiter
-  if not content:match("# === ASSISTANT ===") then
-    content = content .. "\n\n# === ASSISTANT ===\n\n"
-    -- Add the delimiter to the buffer
+  -- Ensure required delimiters exist in the buffer (modify buffer first)
+  -- 1) Ensure USER marker at start if missing
+  local has_user = false
+  for _, l in ipairs(lines) do
+    if l:find("# === USER ===", 1, true) then
+      has_user = true
+      break
+    end
+  end
+  if not has_user then
+    -- Insert USER marker at the very top
+    vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, {"# === USER ===", ""})
+  end
+
+  -- 2) Ensure ASSISTANT marker exists somewhere; if missing, append near end
+  lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local joined = table.concat(lines, "\n")
+  if not joined:find("# === ASSISTANT ===", 1, true) then
     vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {"", "# === ASSISTANT ===", ""})
   end
+
+  -- Recompute full content from buffer after any delimiter insertions
+  lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local content = table.concat(lines, "\n")
 
   -- Make Gemini API request
   local job_id = make_gemini_request(content, session)
