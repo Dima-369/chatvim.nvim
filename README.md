@@ -2,6 +2,8 @@
 
 - I dropped the `npm` dependency and only implemented Google Gemini backend, fully in Lua
 
+**This really shouldn't be a fork, but whatever...**
+
 # Chatvim
 
 **Pure Lua AI chat with markdown files in Neovim using Google Gemini.**
