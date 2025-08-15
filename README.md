@@ -1,75 +1,62 @@
+# Main changes
+
+- I dropped the `npm` dependency and only implemented Google Gemini backend, fully in Lua
+
 # Chatvim
 
-**AI chat with markdown files in Neovim.**
+**Pure Lua AI chat with markdown files in Neovim using Google Gemini.**
 
 Unlike many other Neovim AI plugins, **Chatvim uses a plain markdown document as
-the chat window**. No special dialogs or UI elements are required.
-
-## Video Demo
-
-https://github.com/user-attachments/assets/7fe523e8-b953-4307-ac62-df58884bdfd0
-
-## Usage
-
-Simply type a message into a file in Neovim, and then run the `:ChatvimComplete`
-command to get a response from the default AI model. With no extra
-configuration, the entire file is treaged as the user prompt. See below for more
-details.
+the chat window**. No special dialogs or UI elements are required. This version
+is completely rewritten in pure Lua with no Node.js dependencies.
 
 ## Features
 
-The purpose of Chatvim is to treat a markdown document as a conversation with an
-AI assistant instead of using a separate chat window or dialog box.
+- **Pure Lua implementation** - No Node.js, TypeScript, or external dependencies
+- **Google Gemini 2.0 Flash** - Fast and capable AI responses
+- **Multiple concurrent chats** - Run multiple AI conversations simultaneously
+- **Status bar integration** - Shows active chat count in lualine/status bar
+- **Markdown-based conversations** - Save, version, and share chat files
+- **Streaming responses** - Real-time AI output with visual feedback
 
-You can save, copy, fork, version, and share the markdown document as you would
-with any other markdown file. This is easier for some workflows than using a
-separate chat interface.
+## Usage
 
-Because Chatvim uses chat completion AI models, there must be some way to
-separate user messages, assistant messages, and system messages. This is done
-using delimiters in the markdown document.
+Simply type a message into a markdown file in Neovim, and then run the `:ChatvimComplete`
+command to get a response from Google Gemini. The entire file content is sent as context.
 
-The default delimiters are:
+## Chat Delimiters
+
+The plugin uses delimiters to separate different parts of the conversation:
 
 - `# === USER ===` for user messages
-- `# === ASSISTANT ===` for assistant messages
+- `# === ASSISTANT ===` for assistant messages  
 - `# === SYSTEM ===` for system messages
 
-You can customize these delimiters in the markdown front matter, explained
-below.
-
-If no delimiter is used (as is the case for most markdown documents), then the
-entire markdown document is treated as user input, and the AI model will respond
-to it as if it were a single user message. Delimiters will be added with the
-first response.
+If no delimiter is present, the entire document is treated as user input, and
+`# === ASSISTANT ===` will be automatically added before the AI response.
 
 ## Installation
 
-You must install node.js v24+.
+**Requirements:**
+- Set `GOOGLE_API_KEY` or `GEMINI_API_KEY` environment variable with your Google AI API key
+- `curl` command available in your system PATH
 
-You must also set at least one API key:
-
-- Set `XAI_API_KEY` environment variable to your xAI API key.
-- Set `OPENAI_API_KEY` environment variable to your OpenAI API key.
-
-Then, install with LazyVim:
+**LazyVim:**
 
 ```lua
 {
   "chatvim/chatvim.nvim",
-  build = "npm install",
   config = function()
     require("chatvim")
   end,
-},
+}
 ```
 
-Or with Packer:
+**Packer:**
 
 ```lua
 use {
   "chatvim/chatvim.nvim",
-  run = "npm install",
   config = function()
     require("chatvim")
   end,
@@ -82,14 +69,20 @@ use {
 :ChatvimComplete
 ```
 
-Completes the current markdown document using the AI model. If no delimiters are
+Completes the current markdown document using Google Gemini. If no delimiters are
 present, it will treat the input as user input and append a response.
 
 ```vim
 :ChatvimStop
 ```
 
-Stops the current streaming response.
+Stops the streaming response in the current buffer.
+
+```vim
+:ChatvimStopAll
+```
+
+Stops all active streaming responses across all buffers.
 
 ```vim
 :ChatvimNew [direction]
@@ -99,72 +92,55 @@ Stops the current streaming response.
 (unsaved) markdown document in a new split window for a new chat session. If
 `direction` is not specified, it defaults to the current window.
 
-## Recommended Shortcuts
+## Default Keybindings
 
-Add these shortcuts to your nvim configuration to make it easier to use Chatvim.
+The plugin automatically sets up these keybindings:
 
 ```lua
-local opts = { noremap = true, silent = true }
-vim.api.nvim_set_keymap("n", "<Leader>cvc", ":ChatvimComplete<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvs", ":ChatvimStop<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvw", ":ChatvimWrite<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnn", ":ChatvimNew<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnl", ":ChatvimNewLeft<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnr", ":ChatvimNewRight<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnb", ":ChatvimNewBottom<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnt", ":ChatvimNewTop<CR>", opts)
+<Leader>cvc  -- :ChatvimComplete (start completion)
+<Leader>cvs  -- :ChatvimStop (stop current buffer completion)
+<Leader>cvS  -- :ChatvimStopAll (stop all completions)
+<Leader>cvnn -- :ChatvimNew (new chat in current window)
+<Leader>cvnl -- :ChatvimNewLeft (new chat in left split)
+<Leader>cvnr -- :ChatvimNewRight (new chat in right split)
+<Leader>cvnt -- :ChatvimNewTop (new chat in top split)
+<Leader>cvnb -- :ChatvimNewBottom (new chat in bottom split)
+<Leader>cvhh -- :ChatvimHelp (help in current window)
+<Leader>cvhl -- :ChatvimHelpLeft (help in left split)
+<Leader>cvhr -- :ChatvimHelpRight (help in right split)
+<Leader>cvht -- :ChatvimHelpTop (help in top split)
+<Leader>cvhb -- :ChatvimHelpBottom (help in bottom split)
 ```
 
-## Configuration
+## Status Bar Integration
 
-Use "+++" for TOML or "---" for YAML front matter. Front matter is used to
-specify settings for Chatvim. Place the front matter at the top of your markdown
-document, before any content. The front matter should look like this:
+For **lualine** users, add this to your lualine configuration to show active chat count:
 
-```markdown
-+++
-model = "grok-3"  # or "gpt-4.1", etc.
-delimiterPrefix = "\n\n"
-delimiterSuffix = "\n\n"
-userDelimiter = "# === USER ==="
-assistantDelimiter = "# === ASSISTANT ==="
-systemDelimiter = "# === SYSTEM ==="
-+++
+```lua
+require('lualine').setup {
+  sections = {
+    lualine_x = {
+      function()
+        return require('chatvim').get_status()
+      end,
+      'encoding', 'fileformat', 'filetype'
+    },
+  }
+}
 ```
 
-All fields are optional.
+The status will show:
+- Nothing when no chats are active
+- "🤖 1 chat" when one completion is running
+- "🤖 X chats" when multiple completions are running
 
-## Models
+## Model
 
-Models supported:
-
-- `claude-sonnet-4-0` (Anthropic)
-- `claude-opus-4-0` (Anthropic)
-- `claude-3-7-sonnet-latest` (Anthropic)
-- `claude-3-5-sonnet-latest` (Anthropic)
-- `gpt-4.1` (OpenAI)
-- `gpt-4.1-mini` (OpenAI)
-- `gpt-4.1-nano` (OpenAI)
-- `gpt-4o` (OpenAI)
-- `gpt-4o-mini` (OpenAI)
-- `gpt-4o-mini-search-preview` (OpenAI)
-- `gpt-4o-search-preview` (OpenAI)
-- `o3` (OpenAI)
-- `o3-mini` (OpenAI)
-- `o1` (OpenAI)
-- `o1-mini` (OpenAI)
-- `grok-3` (default) (xAI)
-- `grok-4-0709` (xAI)
-- `grok-3-mini` (xAI)
-- `grok-3-fast` (xAI)
-- `grok-3-mini-fast` (xAI)
-
-Providers supported:
-
-- xAI (Set `XAI_API_KEY` environment variable to your xAI API key)
-- OpenAI (Set `OPENAI_API_KEY` environment variable to your OpenAI API key)
-- Anthropic (Set `ANTHROPIC_API_KEY` environment variable to your Anthropic API
-  key)
+This plugin uses **Google Gemini 2.0 Flash Experimental** which provides:
+- Fast response times
+- High-quality text generation
+- Large context window (up to 8192 output tokens)
+- Streaming responses for real-time feedback
 
 ## Copyright
 

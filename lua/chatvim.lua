@@ -1,51 +1,90 @@
-local spinner = {
-  frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
-  index = 1,
-  active = false,
-  buf = nil,
-  win = nil,
-  timer = nil,
+-- Global state for managing active chat sessions
+local active_sessions = {}
+local session_counter = 0
+
+-- Status bar integration
+local status_component = {
+  active_count = 0,
+  update_callbacks = {}
 }
 
--- Store job_id and session globally to allow stopping
-local current_job_id = nil
-local current_session = nil
+-- Session management
+local function create_session_id()
+  session_counter = session_counter + 1
+  return session_counter
+end
 
-local function update_spinner()
+local function update_status_bar()
+  status_component.active_count = vim.tbl_count(active_sessions)
+  for _, callback in ipairs(status_component.update_callbacks) do
+    callback(status_component.active_count)
+  end
+end
+
+-- Register status bar update callback (for lualine integration)
+local function register_status_callback(callback)
+  table.insert(status_component.update_callbacks, callback)
+end
+
+-- Get status for lualine
+local function get_chatvim_status()
+  local count = status_component.active_count
+  if count == 0 then
+    return ""
+  elseif count == 1 then
+    return "🤖 1 chat"
+  else
+    return "🤖 " .. count .. " chats"
+  end
+end
+
+-- Spinner for individual sessions
+local function create_spinner(session_id)
+  return {
+    frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
+    index = 1,
+    active = false,
+    buf = nil,
+    win = nil,
+    timer = nil,
+    session_id = session_id
+  }
+end
+
+local function update_spinner(spinner)
   if not spinner.active or not spinner.buf or not spinner.win then
     return
   end
   spinner.index = spinner.index % #spinner.frames + 1
-  vim.api.nvim_buf_set_lines(spinner.buf, 0, -1, false, { "Computing... " .. spinner.frames[spinner.index] })
+  vim.api.nvim_buf_set_lines(spinner.buf, 0, -1, false, { "🤖 Gemini thinking... " .. spinner.frames[spinner.index] })
 end
 
-local function open_spinner_window()
-  local win = vim.api.nvim_get_current_win() -- Get the current window
+local function open_spinner_window(spinner)
+  local win = vim.api.nvim_get_current_win()
   local win_config = vim.api.nvim_win_get_config(win)
   local width = win_config.width or vim.api.nvim_win_get_width(win)
   local height = win_config.height or vim.api.nvim_win_get_height(win)
 
-  -- Calculate center position
-  local spinner_width = 15 -- Width of the spinner window
-  local spinner_height = 1 -- Height of the spinner window
-  local col = math.floor((width - spinner_width) / 2) -- Center horizontally
-  local row = math.floor((height - spinner_height) / 2) -- Center vertically
+  local spinner_width = 25
+  local spinner_height = 1
+  local col = math.floor((width - spinner_width) / 2)
+  local row = math.floor((height - spinner_height) / 2)
 
   spinner.buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(spinner.buf, 0, -1, false, { "Computing... " .. spinner.frames[1] })
+  vim.api.nvim_buf_set_lines(spinner.buf, 0, -1, false, { "🤖 Gemini thinking... " .. spinner.frames[1] })
   spinner.win = vim.api.nvim_open_win(spinner.buf, false, {
-    relative = "win", -- Position relative to the current window
-    win = win, -- Specify the current window
+    relative = "win",
+    win = win,
     width = spinner_width,
     height = spinner_height,
-    col = col, -- Centered column
-    row = row, -- Centered row
+    col = col,
+    row = row,
     style = "minimal",
     border = "single",
   })
 end
 
-local function close_spinner_window()
+local function close_spinner_window(spinner)
   if spinner.win then
     vim.api.nvim_win_close(spinner.win, true)
     spinner.win = nil
@@ -56,6 +95,98 @@ local function close_spinner_window()
   end
 end
 
+-- Google Gemini API integration
+local function make_gemini_request(content, session)
+  local api_key = vim.env.GOOGLE_API_KEY or vim.env.GEMINI_API_KEY
+  if not api_key then
+    vim.api.nvim_echo({{"Error: GOOGLE_API_KEY or GEMINI_API_KEY environment variable not set", "ErrorMsg"}}, false, {})
+    return
+  end
+
+  local model = vim.env.GEMINI_MODEL or "gemini-2.5-flash"
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model .. ":streamGenerateContent?alt=sse&key=" .. api_key
+  
+  local payload = {
+    contents = {{
+      role = "user",
+      parts = {{ text = content }},
+    }}
+  }
+
+  local json_payload = vim.fn.json_encode(payload)
+  
+  local curl_cmd = {
+    "curl", "-sS", "-N", "-f",
+    "-H", "Content-Type: application/json",
+    "-H", "Accept: text/event-stream",
+    "-d", json_payload,
+    url
+  }
+
+  local function handle_response_obj(response)
+    if not response then return end
+    if response.error then
+      local msg = response.error.message or vim.fn.json_encode(response.error)
+      vim.api.nvim_echo({{"Gemini API Error: " .. msg, "ErrorMsg"}}, false, {})
+      return
+    end
+    local candidates = response.candidates or {}
+    if candidates[1] and candidates[1].content and candidates[1].content.parts then
+      for _, part in ipairs(candidates[1].content.parts) do
+        if type(part) == "table" and part.text then
+          session:append_chunk(part.text)
+        end
+      end
+    end
+  end
+
+  local job_id = vim.fn.jobstart(curl_cmd, {
+    on_stdout = function(_, data, _)
+      vim.schedule(function()
+        for _, line in ipairs(data) do
+          if line and line ~= "" then
+            local trimmed = line:gsub("\r$", "")
+            if trimmed:match("^data:%s*%[DONE%]%s*$") then
+              -- end of stream
+            elseif trimmed:match("^data:") then
+              local json_str = trimmed:gsub("^data:%s*", "")
+              if json_str ~= "" then
+                local ok, response = pcall(vim.fn.json_decode, json_str)
+                if ok then handle_response_obj(response) end
+              end
+            elseif trimmed:sub(1,1) == "{" or trimmed:sub(1,1) == "[" then
+              local ok, response = pcall(vim.fn.json_decode, trimmed)
+              if ok then handle_response_obj(response) end
+            else
+              -- ignore other lines
+            end
+          end
+        end
+      end)
+    end,
+    on_stderr = function(_, data, _)
+      vim.schedule(function()
+        for _, line in ipairs(data) do
+          if line ~= "" then
+            vim.api.nvim_echo({{"Gemini API Error: " .. line, "ErrorMsg"}}, false, {})
+          end
+        end
+      end)
+    end,
+    on_exit = function(_, code, _)
+      vim.schedule(function()
+        session:finalize()
+        if code ~= 0 then
+          vim.api.nvim_echo({{"Gemini API request failed with code " .. code, "ErrorMsg"}}, false, {})
+        end
+      end)
+    end,
+    stdout_buffered = false,
+  })
+
+  return job_id
+end
+
 local M = {}
 
 function M.complete_text()
@@ -63,14 +194,24 @@ function M.complete_text()
   CompletionSession.__index = CompletionSession
 
   function CompletionSession:new(bufnr, orig_last_line, orig_line_count)
-    return setmetatable({
+    local session_id = create_session_id()
+    local session = setmetatable({
+      id = session_id,
       bufnr = bufnr,
       orig_last_line = orig_last_line,
       orig_line_count = orig_line_count,
       first_chunk = true,
       partial = "",
       update_timer = nil,
+      spinner = create_spinner(session_id),
+      job_id = nil,
     }, self)
+    
+    -- Register this session
+    active_sessions[session_id] = session
+    update_status_bar()
+    
+    return session
   end
 
   function CompletionSession:append_chunk(chunk)
@@ -87,24 +228,8 @@ function M.complete_text()
           local lines = vim.split(self.partial, "\n", { plain = true })
           local last_line_num = vim.api.nvim_buf_line_count(self.bufnr) - 1
 
-          -- Handle the first chunk specially if needed
-          if
-            self.first_chunk
-            and self.orig_last_line ~= ""
-            and self.orig_last_line
-              == vim.api.nvim_buf_get_lines(self.bufnr, self.orig_line_count - 1, self.orig_line_count, false)[1]
-          then
-            vim.api.nvim_buf_set_lines(
-              self.bufnr,
-              self.orig_line_count - 1,
-              self.orig_line_count,
-              false,
-              { self.orig_last_line .. lines[1] }
-            )
-            self.first_chunk = false
-          else
-            vim.api.nvim_buf_set_lines(self.bufnr, last_line_num, last_line_num + 1, false, { lines[1] })
-          end
+          -- Always write starting at the current end of buffer
+          vim.api.nvim_buf_set_lines(self.bufnr, last_line_num, last_line_num + 1, false, { lines[1] })
 
           -- Append any additional complete lines
           if #lines > 2 then
@@ -152,29 +277,22 @@ function M.complete_text()
       self.update_timer:close()
       self.update_timer = nil
     end
-    -- Write any remaining buffered content when the process ends, using the same newline handling logic
+    
+    -- Stop spinner
+    self.spinner.active = false
+    if self.spinner.timer then
+      self.spinner.timer:stop()
+      self.spinner.timer = nil
+    end
+    close_spinner_window(self.spinner)
+    
+    -- Write any remaining buffered content when the process ends
     if self.partial ~= "" then
       local lines = vim.split(self.partial, "\n", { plain = true })
       local last_line_num = vim.api.nvim_buf_line_count(self.bufnr) - 1
 
-      -- Handle the first chunk specially if needed
-      if
-        self.first_chunk
-        and self.orig_last_line ~= ""
-        and self.orig_last_line
-          == vim.api.nvim_buf_get_lines(self.bufnr, self.orig_line_count - 1, self.orig_line_count, false)[1]
-      then
-        vim.api.nvim_buf_set_lines(
-          self.bufnr,
-          self.orig_line_count - 1,
-          self.orig_line_count,
-          false,
-          { self.orig_last_line .. lines[1] }
-        )
-        self.first_chunk = false
-      else
-        vim.api.nvim_buf_set_lines(self.bufnr, last_line_num, last_line_num + 1, false, { lines[1] })
-      end
+      -- Always write starting at the current end of buffer
+      vim.api.nvim_buf_set_lines(self.bufnr, last_line_num, last_line_num + 1, false, { lines[1] })
 
       -- Append any additional complete lines
       if #lines > 2 then
@@ -205,7 +323,12 @@ function M.complete_text()
       -- Reset partial after finalizing
       self.partial = ""
     end
-    vim.api.nvim_echo({ { "[Streaming complete]", "Normal" } }, false, {})
+    
+    -- Unregister session
+    active_sessions[self.id] = nil
+    update_status_bar()
+    
+    vim.api.nvim_echo({ { "🤖 Gemini response complete", "Normal" } }, false, {})
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
@@ -214,144 +337,98 @@ function M.complete_text()
     return
   end
 
-  -- If a job is already running, stop it before starting a new one
-  if current_job_id then
-    vim.api.nvim_echo({ { "[Warning: Stopping existing completion process]", "WarningMsg" } }, false, {})
-    vim.fn.jobstop(current_job_id)
-    -- Cleanup will happen via on_exit or ChatvimStop
-  end
-
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local orig_last_line = lines[#lines] or ""
   local orig_line_count = #lines
   local session = CompletionSession:new(bufnr, orig_last_line, orig_line_count)
-  current_session = session -- Store session for potential cleanup
 
-  local function on_stdout(_, data, _)
-    vim.schedule(function()
-      for _, line in ipairs(data) do
-        if line ~= "" then
-          local ok, msg = pcall(vim.fn.json_decode, line)
-          if ok and msg and type(msg) == "table" and msg.chunk ~= nil and msg.chunk ~= "" then
-            session.partial = session:append_chunk(msg.chunk)
-          else
-            -- error handling for unexpected messages
-            vim.api.nvim_echo({ { "[Warning] Unexpected message: " .. line, "WarningMsg" } }, false, {})
-          end
-        end
-      end
-    end)
-  end
-
-  local function on_stderr(_, data, _)
-    vim.schedule(function()
-      for _, line in ipairs(data) do
-        if line ~= "" then
-          vim.api.nvim_echo({ { "[Error] " .. line, "ErrorMsg" } }, false, {})
-        end
-      end
-    end)
-  end
-
-  spinner.active = true
-  open_spinner_window()
-
-  local function on_exit(_, code, _)
-    vim.schedule(function()
-      session:finalize()
-      spinner.active = false
-      if spinner.timer then
-        spinner.timer:stop()
-        spinner.timer = nil
-      end
-      close_spinner_window()
-      current_job_id = nil
-      current_session = nil
-      if code ~= 0 then
-        vim.api.nvim_echo({ { "[Process exited with error code " .. code .. "]", "ErrorMsg" } }, false, {})
-      end
-    end)
-  end
-
-  -- Start a timer to animate the spinner
-  spinner.timer = vim.loop.new_timer()
-  spinner.timer:start(
+  -- Start spinner
+  session.spinner.active = true
+  open_spinner_window(session.spinner)
+  
+  -- Start spinner animation timer
+  session.spinner.timer = vim.loop.new_timer()
+  session.spinner.timer:start(
     0,
     80,
     vim.schedule_wrap(function()
-      if spinner.active then
-        update_spinner()
+      if session.spinner.active then
+        update_spinner(session.spinner)
       else
-        if spinner.timer then
-          spinner.timer:stop()
-          spinner.timer = nil
+        if session.spinner.timer then
+          session.spinner.timer:stop()
+          session.spinner.timer = nil
         end
       end
     end)
   )
 
-  local plugin_dir = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
-  local stream_js_path = plugin_dir .. "../chatvim.ts"
+  -- Parse markdown content for delimiters
+  local content = table.concat(lines, "\n")
+  
+  -- Check if content has delimiters, if not add assistant delimiter
+  if not content:match("# === ASSISTANT ===") then
+    content = content .. "\n\n# === ASSISTANT ===\n\n"
+    -- Add the delimiter to the buffer
+    vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {"", "# === ASSISTANT ===", ""})
+  end
 
-  local job_id = vim.fn.jobstart({ "node", stream_js_path, "complete", "--chunk", "--add-delimiters" }, {
-    on_stdout = on_stdout,
-    on_stderr = on_stderr,
-    on_exit = on_exit,
-    stdout_buffered = false,
-  })
-
-  if job_id <= 0 then
-    vim.api.nvim_echo({ { "[Error: Failed to start job]", "ErrorMsg" } }, false, {})
-    spinner.active = false
-    if spinner.timer then
-      spinner.timer:stop()
-      spinner.timer = nil
-    end
-
-    close_spinner_window()
-    current_job_id = nil
-    current_session = nil
+  -- Make Gemini API request
+  local job_id = make_gemini_request(content, session)
+  
+  if not job_id or job_id <= 0 then
+    vim.api.nvim_echo({ { "Failed to start Gemini request", "ErrorMsg" } }, false, {})
+    session:finalize()
     return
   end
 
-  -- Store the job_id for stopping later
-  current_job_id = job_id
-
-  -- local payload = {
-  --   method = "complete",
-  --   params = { text = table.concat(lines, "\n") },
-  -- }
-  -- vim.fn.chansend(job_id, vim.fn.json_encode(payload) .. "\n")
-  vim.fn.chansend(job_id, table.concat(lines, "\n"))
-  vim.fn.chanclose(job_id, "stdin")
+  session.job_id = job_id
 end
 
 function M.stop_completion()
-  if not current_job_id then
-    vim.api.nvim_echo({ { "[Info: No completion process running]", "Normal" } }, false, {})
+  local bufnr = vim.api.nvim_get_current_buf()
+  local session_to_stop = nil
+  
+  -- Find session for current buffer
+  for _, session in pairs(active_sessions) do
+    if session.bufnr == bufnr then
+      session_to_stop = session
+      break
+    end
+  end
+  
+  if not session_to_stop then
+    vim.api.nvim_echo({ { "No active completion in this buffer", "Normal" } }, false, {})
     return
   end
 
   -- Stop the running job
-  vim.fn.jobstop(current_job_id)
-  vim.api.nvim_echo({ { "[Info: Completion process stopped]", "Normal" } }, false, {})
-
-  -- Finalize the session if it exists
-  if current_session then
-    current_session:finalize()
-    current_session = nil
+  if session_to_stop.job_id then
+    vim.fn.jobstop(session_to_stop.job_id)
   end
+  
+  vim.api.nvim_echo({ { "🤖 Gemini completion stopped", "Normal" } }, false, {})
 
-  -- Cleanup spinner and timer
-  spinner.active = false
-  if spinner.timer then
-    spinner.timer:stop()
-    spinner.timer = nil
+  -- Finalize the session
+  session_to_stop:finalize()
+end
+
+function M.stop_all_completions()
+  if vim.tbl_isempty(active_sessions) then
+    vim.api.nvim_echo({ { "No active completions", "Normal" } }, false, {})
+    return
   end
-  close_spinner_window()
-
-  -- Clear stored job_id
-  current_job_id = nil
+  
+  local count = 0
+  for _, session in pairs(active_sessions) do
+    if session.job_id then
+      vim.fn.jobstop(session.job_id)
+    end
+    session:finalize()
+    count = count + 1
+  end
+  
+  vim.api.nvim_echo({ { "🤖 Stopped " .. count .. " Gemini completions", "Normal" } }, false, {})
 end
 
 -- Function to open a new markdown buffer in a left-side split
@@ -464,11 +541,15 @@ end, { desc = "Open a new markdown buffer in a bottom split" })
 
 vim.api.nvim_create_user_command("ChatvimComplete", function()
   require("chatvim").complete_text()
-end, {})
+end, { desc = "Complete text using Google Gemini" })
 
 vim.api.nvim_create_user_command("ChatvimStop", function()
   require("chatvim").stop_completion()
-end, {})
+end, { desc = "Stop Gemini completion in current buffer" })
+
+vim.api.nvim_create_user_command("ChatvimStopAll", function()
+  require("chatvim").stop_all_completions()
+end, { desc = "Stop all active Gemini completions" })
 
 vim.api.nvim_create_user_command("ChatvimHelp", open_chatvim_help_window, {
   nargs = "?", -- Accepts 0 or 1 argument
@@ -503,6 +584,7 @@ end, {
 local opts = { noremap = true, silent = true }
 vim.api.nvim_set_keymap("n", "<Leader>cvc", ":ChatvimComplete<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvs", ":ChatvimStop<CR>", opts)
+vim.api.nvim_set_keymap("n", "<Leader>cvS", ":ChatvimStopAll<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvnn", ":ChatvimNew<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvnl", ":ChatvimNewLeft<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvnr", ":ChatvimNewRight<CR>", opts)
@@ -513,5 +595,10 @@ vim.api.nvim_set_keymap("n", "<Leader>cvhl", ":ChatvimHelpLeft<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvhr", ":ChatvimHelpRight<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvht", ":ChatvimHelpTop<CR>", opts)
 vim.api.nvim_set_keymap("n", "<Leader>cvhb", ":ChatvimHelpBottom<CR>", opts)
+
+-- Export functions for external use (like lualine)
+M.get_status = get_chatvim_status
+M.register_status_callback = register_status_callback
+M.stop_all_completions = M.stop_all_completions
 
 return M
