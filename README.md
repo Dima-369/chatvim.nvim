@@ -92,9 +92,30 @@ Stops all active streaming responses across all buffers.
 (unsaved) markdown document in a new split window for a new chat session. If
 `direction` is not specified, it defaults to the current window.
 
-## Default Keybindings
+## Optional Keybindings
 
-The plugin automatically sets up these keybindings:
+Keymaps are disabled by default. You can enable and customize them via setup and then apply them:
+
+```lua
+require('chatvim').setup({
+  keymaps = {
+    enabled = true,        -- default: false
+    prefix = '<Leader>cv', -- default prefix
+    complete = 'c',        -- :ChatvimComplete -> <Leader>cvc
+    stop = 's',            -- :ChatvimStop     -> <Leader>cvs
+    stop_all = 'S',        -- :ChatvimStopAll  -> <Leader>cvS
+    new = {
+      current = 'nn', left = 'nl', right = 'nr', top = 'nt', bottom = 'nb',
+    },
+    help = {
+      current = 'hh', left = 'hl', right = 'hr', top = 'ht', bottom = 'hb',
+    },
+  }
+})
+require('chatvim').apply_keymaps()
+```
+
+If you enable the defaults above, the following mappings will be set:
 
 ```lua
 <Leader>cvc  -- :ChatvimComplete (start completion)

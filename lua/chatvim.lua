@@ -115,6 +115,52 @@ local function close_spinner_window(spinner)
   end
 end
 
+-- Normalize marker spacing around USER/ASSISTANT/SYSTEM delimiters
+local function normalize_marker_spacing(bufnr)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local n = #lines
+  local out = {}
+
+  local function is_marker(line)
+    return line == "# === USER ===" or line == "# === ASSISTANT ===" or line == "# === SYSTEM ==="
+  end
+
+  local i = 1
+  -- drop leading blank lines
+  while i <= n and lines[i] == "" do i = i + 1 end
+
+  while i <= n do
+    local l = lines[i]
+    if is_marker(l) then
+      -- ensure exactly one blank line before marker unless it's the very first line in file
+      if #out > 0 and out[#out] ~= "" then table.insert(out, "") end
+      table.insert(out, l)
+      -- ensure exactly one blank line after marker
+      table.insert(out, "")
+      -- skip consecutive blanks in source right after marker
+      local j = i + 1
+      while j <= n and lines[j] == "" do j = j + 1 end
+      i = j
+    else
+      table.insert(out, l)
+      i = i + 1
+    end
+  end
+
+  -- write back only if changed
+  local changed = false
+  if #out ~= #lines then
+    changed = true
+  else
+    for k = 1, #out do
+      if out[k] ~= lines[k] then changed = true break end
+    end
+  end
+  if changed then
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, out)
+  end
+end
+
 -- Google Gemini API integration
 local function make_gemini_request(content, session)
   local api_key = vim.env.GOOGLE_API_KEY or vim.env.GEMINI_API_KEY
@@ -410,7 +456,7 @@ function M.complete_text()
   end
   if not has_user then
     -- Insert USER marker at the very top
-    vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, {"# === USER ===", ""})
+    vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, {"# === USER ==="})
   end
 
   -- 2) Ensure ASSISTANT marker exists somewhere; if missing, append near end
@@ -419,6 +465,9 @@ function M.complete_text()
   if not joined:find("# === ASSISTANT ===", 1, true) then
     vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, {"", "# === ASSISTANT ===", ""})
   end
+
+  -- Normalize spacing around markers for clean structure (single blank line between sections)
+  normalize_marker_spacing(bufnr)
 
   -- Recompute full content from buffer after any delimiter insertions
   lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -782,25 +831,58 @@ vim.api.nvim_create_user_command("ChatvimDebugRequest", function()
   require("chatvim").debug_request()
 end, { desc = "Open a JSON buffer showing the exact Gemini request body" })
 
--- Chatvim (chatvim.nvim) keybindings
-local opts = { noremap = true, silent = true }
-vim.api.nvim_set_keymap("n", "<Leader>cvc", ":ChatvimComplete<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvs", ":ChatvimStop<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvS", ":ChatvimStopAll<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnn", ":ChatvimNew<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnl", ":ChatvimNewLeft<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnr", ":ChatvimNewRight<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnt", ":ChatvimNewTop<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvnb", ":ChatvimNewBottom<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvhh", ":ChatvimHelp<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvhl", ":ChatvimHelpLeft<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvhr", ":ChatvimHelpRight<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvht", ":ChatvimHelpTop<CR>", opts)
-vim.api.nvim_set_keymap("n", "<Leader>cvhb", ":ChatvimHelpBottom<CR>", opts)
+-- Optional Chatvim keybindings (configurable via setup)
+local applied_keymaps = {}
+local function clear_keymaps()
+  for _, lhs in ipairs(applied_keymaps) do
+    if vim.keymap and vim.keymap.del then
+      pcall(vim.keymap.del, 'n', lhs)
+    else
+      pcall(vim.api.nvim_del_keymap, 'n', lhs)
+    end
+  end
+  applied_keymaps = {}
+end
+
+local function map(lhs, rhs, desc)
+  local opts = { noremap = true, silent = true, desc = desc }
+  if vim.keymap and vim.keymap.set then
+    vim.keymap.set('n', lhs, rhs, opts)
+  else
+    vim.api.nvim_set_keymap('n', lhs, rhs, opts)
+  end
+  table.insert(applied_keymaps, lhs)
+end
+
+local function apply_keymaps()
+  clear_keymaps()
+  if not (config.keymaps and config.keymaps.enabled) then return end
+  local km = config.keymaps
+  local p = km.prefix or "<Leader>cv"
+  -- Commands
+  map(p .. (km.complete or 'c'), ":ChatvimComplete<CR>", "Chatvim: Complete")
+  map(p .. (km.stop or 's'), ":ChatvimStop<CR>", "Chatvim: Stop current completion")
+  map(p .. (km.stop_all or 'S'), ":ChatvimStopAll<CR>", "Chatvim: Stop all completions")
+  -- New chat
+  local new = km.new or {}
+  map(p .. (new.current or 'nn'), ":ChatvimNew<CR>", "Chatvim: New chat (current window)")
+  map(p .. (new.left or 'nl'), ":ChatvimNewLeft<CR>", "Chatvim: New chat (left split)")
+  map(p .. (new.right or 'nr'), ":ChatvimNewRight<CR>", "Chatvim: New chat (right split)")
+  map(p .. (new.top or 'nt'), ":ChatvimNewTop<CR>", "Chatvim: New chat (top split)")
+  map(p .. (new.bottom or 'nb'), ":ChatvimNewBottom<CR>", "Chatvim: New chat (bottom split)")
+  -- Help
+  local help = km.help or {}
+  map(p .. (help.current or 'hh'), ":ChatvimHelp<CR>", "Chatvim: Help (current window)")
+  map(p .. (help.left or 'hl'), ":ChatvimHelpLeft<CR>", "Chatvim: Help (left split)")
+  map(p .. (help.right or 'hr'), ":ChatvimHelpRight<CR>", "Chatvim: Help (right split)")
+  map(p .. (help.top or 'ht'), ":ChatvimHelpTop<CR>", "Chatvim: Help (top split)")
+  map(p .. (help.bottom or 'hb'), ":ChatvimHelpBottom<CR>", "Chatvim: Help (bottom split)")
+end
 
 -- Export functions for external use (like lualine)
 M.get_status = get_chatvim_status
 M.register_status_callback = register_status_callback
 M.stop_all_completions = M.stop_all_completions
+M.apply_keymaps = apply_keymaps
 
 return M
