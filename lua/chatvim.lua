@@ -12,6 +12,12 @@ local status_component = {
 local config = {
   auto_scroll = false, -- when true, auto-scrolls a visible window of the chat buffer
   show_spinner_window = false, -- when true, show a floating spinner window
+  -- Buffer-local keymaps inside Chatvim chat buffers
+  local_keymaps = {
+    enabled = true,         -- enabled by default
+    map_enter = true,       -- map <CR> in normal mode to :ChatvimComplete
+    map_ctrl_enter = true,  -- map <C-CR> in normal/visual (if supported by GUI/terminal)
+  },
 }
 
 -- Session management
