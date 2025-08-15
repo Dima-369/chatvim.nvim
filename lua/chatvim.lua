@@ -686,6 +686,27 @@ end
 
 -- Function to open a new markdown buffer in a left-side split
 
+-- Apply buffer-local keymaps for Chatvim buffers
+local function apply_buffer_local_keymaps(bufnr)
+  if not config.local_keymaps.enabled then return end
+
+  local opts = { noremap = true, silent = true, buffer = bufnr }
+
+  -- In Normal mode, <CR> submits the prompt.
+  if config.local_keymaps.map_enter then
+    vim.keymap.set('n', '<CR>', ':ChatvimComplete<CR>', opts)
+  end
+
+  -- In Normal and Insert mode, <C-CR> submits the prompt.
+  -- This is a common pattern for chat interfaces.
+  if config.local_keymaps.map_ctrl_enter then
+    -- Normal mode: submit
+    vim.keymap.set('n', '<C-CR>', ':ChatvimComplete<CR>', opts)
+    -- Insert mode: submit without adding a newline first
+    vim.keymap.set('i', '<C-CR>', '<Esc>:ChatvimComplete<CR>', opts)
+  end
+end
+
 local function open_chatvim_window(args)
   -- Generate a unique filename like "/path/to/cwd/chat-YYYY-MM-DD-HH-MM-SS.md"
   local filename = vim.fn.getcwd() .. "/chat-" .. os.date("%Y-%m-%d-%H-%M-%S") .. ".md"
@@ -715,20 +736,8 @@ local function open_chatvim_window(args)
   -- Optional: Ensure filetype is markdown (usually auto-detected, but explicit for safety)
   vim.bo.filetype = "markdown"
 
-  -- Apply buffer-local keymaps if enabled
-  if config.local_keymaps.enabled then
-    local buf = vim.api.nvim_get_current_buf()
-    local opts = { noremap = true, silent = true, buffer = buf }
-
-    if config.local_keymaps.map_enter then
-      vim.api.nvim_buf_set_keymap('n', '<CR>', ':ChatvimComplete<CR>', opts)
-      vim.api.nvim_buf_set_keymap('i', '<CR>', '<CR><Cmd>ChatvimComplete<CR>', opts)
-    end
-    if config.local_keymaps.map_ctrl_enter then
-      vim.api.nvim_buf_set_keymap('n', '<C-CR>', ':ChatvimComplete<CR>', opts)
-      vim.api.nvim_buf_set_keymap('v', '<C-CR>', '<C-CR><Cmd>ChatvimComplete<CR>', opts)
-    end
-  end
+  -- Apply buffer-local keymaps
+  apply_buffer_local_keymaps(vim.api.nvim_get_current_buf())
 end
 
 -- Function to open a new markdown buffer prefilled with help text from Node.js
@@ -761,20 +770,8 @@ local function open_chatvim_help_window(args)
   -- Optional: Ensure filetype is markdown (usually auto-detected, but explicit for safety)
   vim.bo.filetype = "markdown"
 
-  -- Apply buffer-local keymaps if enabled
-  if config.local_keymaps.enabled then
-    local buf = vim.api.nvim_get_current_buf()
-    local opts = { noremap = true, silent = true, buffer = buf }
-
-    if config.local_keymaps.map_enter then
-      vim.api.nvim_buf_set_keymap('n', '<CR>', ':ChatvimComplete<CR>', opts)
-      vim.api.nvim_buf_set_keymap('i', '<CR>', '<CR><Cmd>ChatvimComplete<CR>', opts)
-    end
-    if config.local_keymaps.map_ctrl_enter then
-      vim.api.nvim_buf_set_keymap('n', '<C-CR>', ':ChatvimComplete<CR>', opts)
-      vim.api.nvim_buf_set_keymap('v', '<C-CR>', '<C-CR><Cmd>ChatvimComplete<CR>', opts)
-    end
-  end
+  -- Apply buffer-local keymaps
+  apply_buffer_local_keymaps(vim.api.nvim_get_current_buf())
 
   -- Get the current buffer (newly created)
   local buf = vim.api.nvim_get_current_buf()
