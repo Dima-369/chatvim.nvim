@@ -538,24 +538,95 @@ local function build_gemini_request_from_buffer(bufnr)
   return body
 end
 
+-- JSON pretty-printer (pure Lua). Uses jq if available, otherwise formats here.
+local function json_escape(str)
+  return (str
+    :gsub('\\', '\\\\')
+    :gsub('"', '\\"')
+    :gsub('\b', '\\b')
+    :gsub('\f', '\\f')
+    :gsub('\n', '\\n')
+    :gsub('\r', '\\r')
+    :gsub('\t', '\\t')
+  )
+end
+
+local function is_array(tbl)
+  if type(tbl) ~= 'table' then return false end
+  local n = 0
+  local max = 0
+  for k, _ in pairs(tbl) do
+    if type(k) ~= 'number' then return false end
+    if k > max then max = k end
+    n = n + 1
+  end
+  return n > 0 and max == n
+end
+
+local function encode_pretty_json(val, depth)
+  depth = depth or 0
+  local indent = string.rep('  ', depth)
+  local next_indent = string.rep('  ', depth + 1)
+  local t = type(val)
+  if val == vim.NIL or t == 'nil' then return '""' end
+  if t == 'number' or t == 'boolean' then return tostring(val) end
+  if t == 'string' then return '"' .. json_escape(val) .. '"' end
+  if t == 'table' then
+    if is_array(val) then
+      if #val == 0 then return '[]' end
+      local items = {}
+      for i = 1, #val do
+        table.insert(items, next_indent .. encode_pretty_json(val[i], depth + 1))
+      end
+      return '[\n' .. table.concat(items, ',\n') .. '\n' .. indent .. ']'
+    else
+      local keys = {}
+      for k, _ in pairs(val) do table.insert(keys, k) end
+      table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
+      if #keys == 0 then return '{}' end
+      local items = {}
+      for _, k in ipairs(keys) do
+        local key_str = '"' .. json_escape(tostring(k)) .. '"'
+        local v_str = encode_pretty_json(val[k], depth + 1)
+        table.insert(items, next_indent .. key_str .. ': ' .. v_str)
+      end
+      return '{\n' .. table.concat(items, ',\n') .. '\n' .. indent .. '}'
+    end
+  end
+  return '""'
+end
+
 -- Open a new JSON buffer showing the request body to be sent
 function M.debug_request()
   local bufnr = vim.api.nvim_get_current_buf()
   local body = build_gemini_request_from_buffer(bufnr)
-  local json = vim.fn.json_encode(body)
+  local raw = vim.fn.json_encode(body)
 
-  -- Create a scratch JSON buffer in a new split
-  vim.cmd("new")
+  local pretty = nil
+  if vim.fn.executable('jq') == 1 then
+    local ok, out = pcall(vim.fn.systemlist, 'jq .', raw)
+    if ok and type(out) == 'table' and #out > 0 and vim.v.shell_error == 0 then
+      pretty = out
+    end
+  end
+  if not pretty then
+    pretty = {}
+    local s = encode_pretty_json(body)
+    for line in s:gmatch("[^\n]+") do table.insert(pretty, line) end
+  end
+
+  -- Create a scratch JSON buffer in a new split (modifiable)
+  vim.cmd('new')
   local out_buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_set_option(out_buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(out_buf, "bufhidden", "wipe")
-  vim.api.nvim_buf_set_option(out_buf, "swapfile", false)
-  vim.api.nvim_buf_set_option(out_buf, "modifiable", true)
-  vim.api.nvim_buf_set_option(out_buf, "filetype", "json")
-  vim.api.nvim_buf_set_lines(out_buf, 0, -1, false, { json })
-  vim.api.nvim_buf_set_option(out_buf, "modifiable", false)
+  vim.api.nvim_buf_set_option(out_buf, 'buftype', 'nofile')
+  vim.api.nvim_buf_set_option(out_buf, 'bufhidden', 'wipe')
+  vim.api.nvim_buf_set_option(out_buf, 'swapfile', false)
+  vim.api.nvim_buf_set_option(out_buf, 'modifiable', true)
+  vim.api.nvim_buf_set_option(out_buf, 'filetype', 'json')
+  vim.api.nvim_buf_set_lines(out_buf, 0, -1, false, pretty)
+  -- leave modifiable so user can tweak
 
-  vim.api.nvim_echo({ { "Opened Gemini request body (JSON)", "Normal" } }, false, {})
+  vim.api.nvim_echo({ { 'Opened Gemini request body (JSON, pretty)', 'Normal' } }, false, {})
 end
 
 -- Function to open a new markdown buffer in a left-side split
