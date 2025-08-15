@@ -197,7 +197,3 @@ This plugin uses **Google Gemini 2.0 Flash Experimental** which provides:
 - High-quality text generation
 - Large context window (up to 8192 output tokens)
 - Streaming responses for real-time feedback
-
-## Copyright
-
-Copyright (C) 2025 EarthBucks Inc.
