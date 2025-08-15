@@ -482,6 +482,82 @@ function M.stop_all_completions()
   vim.api.nvim_echo({ { "🤖 Stopped " .. count .. " Gemini completions", "Normal" } }, false, {})
 end
 
+-- Build a Gemini request body from the current buffer by parsing delimiters
+local function build_gemini_request_from_buffer(bufnr)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local messages = {}
+  local system_parts = {}
+
+  local current_role = nil
+  local current_text = {}
+
+  local function flush()
+    if current_role and #current_text > 0 then
+      local text = table.concat(current_text, "\n")
+      if current_role == "system" then
+        table.insert(system_parts, text)
+      else
+        local role = (current_role == "assistant") and "model" or "user"
+        table.insert(messages, { role = role, parts = { { text = text } } })
+      end
+    end
+    current_role = nil
+    current_text = {}
+  end
+
+  local function is_delim(line, what)
+    return line == "# === " .. what .. " ==="
+  end
+
+  for _, l in ipairs(lines) do
+    if is_delim(l, "USER") then
+      flush()
+      current_role = "user"
+    elseif is_delim(l, "ASSISTANT") then
+      flush()
+      current_role = "assistant"
+    elseif is_delim(l, "SYSTEM") then
+      flush()
+      current_role = "system"
+    else
+      table.insert(current_text, l)
+    end
+  end
+  flush()
+
+  -- If no delimiters found, treat entire buffer as one user message
+  if #messages == 0 and #system_parts == 0 then
+    local text = table.concat(lines, "\n")
+    messages = { { role = "user", parts = { { text = text } } } }
+  end
+
+  local body = { contents = messages }
+  if #system_parts > 0 then
+    body.system_instruction = { parts = { { text = table.concat(system_parts, "\n\n") } } }
+  end
+  return body
+end
+
+-- Open a new JSON buffer showing the request body to be sent
+function M.debug_request()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local body = build_gemini_request_from_buffer(bufnr)
+  local json = vim.fn.json_encode(body)
+
+  -- Create a scratch JSON buffer in a new split
+  vim.cmd("new")
+  local out_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_option(out_buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(out_buf, "bufhidden", "wipe")
+  vim.api.nvim_buf_set_option(out_buf, "swapfile", false)
+  vim.api.nvim_buf_set_option(out_buf, "modifiable", true)
+  vim.api.nvim_buf_set_option(out_buf, "filetype", "json")
+  vim.api.nvim_buf_set_lines(out_buf, 0, -1, false, { json })
+  vim.api.nvim_buf_set_option(out_buf, "modifiable", false)
+
+  vim.api.nvim_echo({ { "Opened Gemini request body (JSON)", "Normal" } }, false, {})
+end
+
 -- Function to open a new markdown buffer in a left-side split
 
 local function open_chatvim_window(args)
@@ -630,6 +706,10 @@ vim.api.nvim_create_user_command("ChatvimHelpBottom", function()
 end, {
   desc = "Open a new markdown buffer with help text in a bottom split",
 })
+
+vim.api.nvim_create_user_command("ChatvimDebugRequest", function()
+  require("chatvim").debug_request()
+end, { desc = "Open a JSON buffer showing the exact Gemini request body" })
 
 -- Chatvim (chatvim.nvim) keybindings
 local opts = { noremap = true, silent = true }
