@@ -8,6 +8,11 @@ local status_component = {
   update_callbacks = {}
 }
 
+-- Configuration (user configurable via setup). Defaults: no cursor movement.
+local config = {
+  auto_scroll = false, -- when true, auto-scrolls a visible window of the chat buffer
+}
+
 -- Session management
 local function create_session_id()
   session_counter = session_counter + 1
@@ -35,6 +40,16 @@ local function get_chatvim_status()
     return "🤖 1 chat"
   else
     return "🤖 " .. count .. " chats"
+  end
+end
+
+-- Safely scroll a window showing the given buffer to its bottom
+local function safe_scroll_to_bottom(bufnr)
+  if not config.auto_scroll then return end
+  local wins = vim.fn.win_findbuf(bufnr)
+  if wins and #wins > 0 then
+    local last_line = vim.api.nvim_buf_line_count(bufnr)
+    pcall(vim.api.nvim_win_set_cursor, wins[1], { math.max(1, last_line), 0 })
   end
 end
 
@@ -189,6 +204,11 @@ end
 
 local M = {}
 
+-- Public setup to configure behavior
+function M.setup(user_config)
+  config = vim.tbl_deep_extend("force", config, user_config or {})
+end
+
 function M.complete_text()
   local CompletionSession = {}
   CompletionSession.__index = CompletionSession
@@ -252,10 +272,8 @@ function M.complete_text()
             { self.partial }
           )
 
-          -- Scroll to the last line to ensure new data is visible
-          local win = vim.api.nvim_get_current_win()
-          local last_line = vim.api.nvim_buf_line_count(self.bufnr)
-          vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+          -- Try to scroll any window that shows this buffer to bottom (if visible)
+          safe_scroll_to_bottom(self.bufnr)
 
           -- Clean up the timer
           if self.update_timer then
@@ -315,10 +333,8 @@ function M.complete_text()
         { self.partial }
       )
 
-      -- Scroll to the last line to ensure new data is visible
-      local win = vim.api.nvim_get_current_win()
-      local last_line = vim.api.nvim_buf_line_count(self.bufnr)
-      vim.api.nvim_win_set_cursor(win, { last_line, 0 })
+      -- Try to scroll any window that shows this buffer to bottom (if visible)
+      safe_scroll_to_bottom(self.bufnr)
 
       -- Reset partial after finalizing
       self.partial = ""
