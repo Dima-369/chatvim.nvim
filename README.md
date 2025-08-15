@@ -13,7 +13,7 @@ is completely rewritten in pure Lua with no Node.js dependencies.
 ## Features
 
 - **Pure Lua implementation** - No Node.js, TypeScript, or external dependencies
-- **Google Gemini 2.0 Flash** - Fast and capable AI responses
+- **Google Gemini 2.5 Flash** - Fast and capable AI responses
 - **Multiple concurrent chats** - Run multiple AI conversations simultaneously
 - **Status bar integration** - Shows active chat count in lualine/status bar
 - **Markdown-based conversations** - Save, version, and share chat files
@@ -189,11 +189,3 @@ The status will show:
 - Nothing when no chats are active
 - "🤖 1 chat" when one completion is running
 - "🤖 X chats" when multiple completions are running
-
-## Model
-
-This plugin uses **Google Gemini 2.0 Flash Experimental** which provides:
-- Fast response times
-- High-quality text generation
-- Large context window (up to 8192 output tokens)
-- Streaming responses for real-time feedback
