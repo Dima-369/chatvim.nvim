@@ -942,11 +942,14 @@ local function open_chatvim_window(args)
 		split_cmd = "botright split"
 	end
 
-	-- Replace current buffer (no split) and convert to scratch "AI Chat"
+	-- Create split if needed, then create a new buffer
 	if split_cmd ~= "" then
 		vim.cmd(split_cmd)
 	end
-	local buf = vim.api.nvim_get_current_buf()
+	
+	-- Create a new buffer and switch to it
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_set_current_buf(buf)
 	pcall(vim.api.nvim_buf_set_name, buf, "AI Chat")
 	vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
 	vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
