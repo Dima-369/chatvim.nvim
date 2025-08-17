@@ -509,12 +509,8 @@ function M.complete_text()
 		vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, { "# === USER ===" })
 	end
 
-	-- 2) Ensure ASSISTANT marker exists somewhere; if missing, append near end
-	lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local joined = table.concat(lines, "\n")
-	if not joined:find("# === ASSISTANT ===", 1, true) then
-		vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { "", "# === ASSISTANT ===", "" })
-	end
+	-- 2) Always append a new ASSISTANT marker at the end to start a fresh response block
+	vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { "", "# === ASSISTANT ===", "" })
 
 	-- Normalize spacing around markers for clean structure (single blank line between sections)
 	normalize_marker_spacing(bufnr)
