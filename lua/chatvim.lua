@@ -20,6 +20,7 @@ local config = {
 	},
 }
 
+
 -- Session management
 local function create_session_id()
 	session_counter = session_counter + 1
@@ -137,6 +138,75 @@ local function close_spinner_window(spinner)
 	end
 end
 
+-- Winbar helpers
+local function set_winbar_for_buffer(bufnr, text)
+	local wins = vim.fn.win_findbuf(bufnr)
+	if not wins or #wins == 0 then
+		return
+	end
+	for _, win in ipairs(wins) do
+		if vim.api.nvim_set_option_value then
+			pcall(vim.api.nvim_set_option_value, "winbar", text, { scope = "local", win = win })
+		else
+			pcall(vim.api.nvim_win_set_option, win, "winbar", text)
+		end
+	end
+end
+
+local function render_winbar_state(state)
+	if state == "ready" then
+		return "[Ready]"
+	else
+		return "[Waiting...]"
+	end
+end
+
+-- Front matter handling: +++ ... +++ with model: <gemini-model>
+local function parse_front_matter(lines)
+	-- Find a front matter block starting at the top (allowing leading blanks)
+	local i = 1
+	while i <= #lines and lines[i] == "" do
+		i = i + 1
+	end
+	if i > #lines or lines[i] ~= "+++" then
+		return nil
+	end
+	local start_idx = i
+	local j = i + 1
+	while j <= #lines and lines[j] ~= "+++" do
+		j = j + 1
+	end
+	if j > #lines then
+		-- No closing +++
+		return nil
+	end
+	local model = nil
+	for k = start_idx + 1, j - 1 do
+		local line = lines[k]
+		local m = line:match("^%s*model:%s*([%w%-%._:]+)%s*$")
+		if m then
+			model = m
+			break
+		end
+	end
+	return { start_idx = start_idx, end_idx = j, model = model }
+end
+
+local function ensure_front_matter(bufnr, lines)
+	local fm = parse_front_matter(lines)
+	if fm then
+		return fm.model, fm
+	end
+	-- Insert default front matter at the very top
+	local default_model = "gemini-2.5-flash"
+	local header = { "+++", "model: " .. default_model, "+++", "" }
+	vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, header)
+	-- Re-read lines and parse again to return consistent indices
+	local new_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	local new_fm = parse_front_matter(new_lines)
+	return default_model, new_fm
+end
+
 -- Normalize marker spacing around USER/ASSISTANT/SYSTEM delimiters
 local function normalize_marker_spacing(bufnr)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -193,7 +263,7 @@ local function normalize_marker_spacing(bufnr)
 end
 
 -- Google Gemini API integration
-local function make_gemini_request(content, session)
+local function make_gemini_request(content, session, model_override)
 	local api_key = vim.env.GOOGLE_API_KEY or vim.env.GEMINI_API_KEY
 	if not api_key then
 		vim.api.nvim_echo(
@@ -204,7 +274,7 @@ local function make_gemini_request(content, session)
 		return
 	end
 
-	local model = vim.env.GEMINI_MODEL or "gemini-2.5-flash"
+	local model = model_override or "gemini-2.5-flash"
 	local url = "https://generativelanguage.googleapis.com/v1beta/models/"
 		.. model
 		.. ":streamGenerateContent?alt=sse&key="
@@ -460,6 +530,9 @@ function M.complete_text()
 		active_sessions[self.id] = nil
 		update_status_bar()
 
+		-- Update winbar back to Ready on completion
+		set_winbar_for_buffer(self.bufnr, render_winbar_state("ready"))
+
 		vim.api.nvim_echo({ { "🤖 Gemini response complete", "Normal" } }, false, {})
 	end
 
@@ -473,6 +546,9 @@ function M.complete_text()
 	local orig_last_line = lines[#lines] or ""
 	local orig_line_count = #lines
 	local session = CompletionSession:new(bufnr, orig_last_line, orig_line_count)
+
+	-- Update winbar to Waiting while request is running
+	set_winbar_for_buffer(bufnr, render_winbar_state("waiting"))
 
 	-- Optional spinner window/animation (disabled by default)
 	session.spinner.active = config.show_spinner_window
@@ -495,6 +571,9 @@ function M.complete_text()
 		)
 	end
 
+	-- Ensure front matter exists and read model override
+	local header_model, fm = ensure_front_matter(bufnr, lines)
+
 	-- Ensure required delimiters exist in the buffer (modify buffer first)
 	-- 1) Ensure USER marker at start if missing
 	local has_user = false
@@ -505,8 +584,13 @@ function M.complete_text()
 		end
 	end
 	if not has_user then
-		-- Insert USER marker at the very top
-		vim.api.nvim_buf_set_lines(bufnr, 0, 0, false, { "# === USER ===" })
+		-- Insert USER marker right after front matter (if any), otherwise at the very top
+		local insert_idx = 0
+		if fm and fm.end_idx then
+			-- fm.end_idx is 1-based line of closing +++; using it as 0-based insert index appends after it
+			insert_idx = fm.end_idx
+		end
+		vim.api.nvim_buf_set_lines(bufnr, insert_idx, insert_idx, false, { "# === USER ===" })
 	end
 
 	-- 2) Always append a new ASSISTANT marker at the end to start a fresh response block
@@ -517,10 +601,69 @@ function M.complete_text()
 
 	-- Recompute full content from buffer after any delimiter insertions
 	lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local content = table.concat(lines, "\n")
+	-- Remove front matter block from content
+	local content_lines = lines
+	local fm2 = parse_front_matter(lines)
+	if fm2 then
+		content_lines = {}
+		for idx, l in ipairs(lines) do
+			if idx < fm2.start_idx or idx > fm2.end_idx then
+				table.insert(content_lines, l)
+			end
+		end
+	end
+	local content = table.concat(content_lines, "\n")
+
+	-- Use model from header if present; otherwise default
+	local model_override = header_model
+
+	-- Update buffer name based on first user prompt
+	local function slugify(text)
+		local s = text:gsub("\n", " ")
+		s = s:match("^%s*(.-)%s*$") or s
+		s = s:sub(1, 40)
+		s = s:gsub("[%z\1-\31]", "")
+		return s
+	end
+	local first_user = nil
+	local seen_user = false
+	for _, l in ipairs(content_lines) do
+		if l == "# === USER ===" then
+			seen_user = true
+		elseif l == "# === ASSISTANT ===" or l == "# === SYSTEM ===" then
+			if seen_user and not first_user then break end
+		else
+			if seen_user and (l ~= "") and not first_user then
+				first_user = l
+				break
+			end
+		end
+	end
+	if first_user and first_user ~= "" then
+		local topic = slugify(first_user)
+		local base = "AI Chat - " .. topic
+		local name = base
+		local n = 2
+		while true do
+			local existing = false
+			for _, b in ipairs(vim.api.nvim_list_bufs()) do
+				if vim.api.nvim_buf_is_loaded(b) then
+					local bn = vim.api.nvim_buf_get_name(b)
+					if bn == name then
+						existing = true
+						break
+					end
+				end
+			end
+			if not existing then break end
+			name = base .. " (" .. n .. ")"
+			n = n + 1
+		end
+		pcall(vim.api.nvim_buf_set_name, bufnr, name)
+	end
 
 	-- Make Gemini API request
-	local job_id = make_gemini_request(content, session)
+	local job_id = make_gemini_request(content, session, model_override)
 
 	if not job_id or job_id <= 0 then
 		vim.api.nvim_echo({ { "Failed to start Gemini request", "ErrorMsg" } }, false, {})
@@ -557,6 +700,8 @@ function M.stop_completion()
 
 	-- Finalize the session
 	session_to_stop:finalize()
+	-- After finalization, ensure winbar is Ready
+	set_winbar_for_buffer(bufnr, render_winbar_state("ready"))
 end
 
 function M.stop_all_completions()
@@ -580,6 +725,17 @@ end
 -- Build a Gemini request body from the current buffer by parsing delimiters
 local function build_gemini_request_from_buffer(bufnr)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	-- Remove front matter block from consideration
+	local fm = parse_front_matter(lines)
+	if fm then
+		local filtered = {}
+		for idx, l in ipairs(lines) do
+			if idx < fm.start_idx or idx > fm.end_idx then
+				table.insert(filtered, l)
+			end
+		end
+		lines = filtered
+	end
 	local messages = {}
 	local system_parts = {}
 
@@ -772,9 +928,6 @@ local function apply_buffer_local_keymaps(bufnr)
 end
 
 local function open_chatvim_window(args)
-	-- Generate a unique filename like "/path/to/cwd/chat-YYYY-MM-DD-HH-MM-SS.md"
-	local filename = vim.fn.getcwd() .. "/chat-" .. os.date("%Y-%m-%d-%H-%M-%S") .. ".md"
-
 	-- Determine window placement based on argument
 	local placement = args.args or ""
 	local split_cmd = ""
@@ -789,77 +942,39 @@ local function open_chatvim_window(args)
 		split_cmd = "botright split"
 	end
 
-	-- Open the split if specified
+	-- Replace current buffer (no split) and convert to scratch "AI Chat"
 	if split_cmd ~= "" then
 		vim.cmd(split_cmd)
 	end
-
-	-- Edit the new file in the target window (creates a new unsaved buffer with the filename)
-	vim.cmd("edit " .. vim.fn.fnameescape(filename))
-
-	-- Optional: Ensure filetype is markdown (usually auto-detected, but explicit for safety)
-	vim.bo.filetype = "markdown"
-
-	vim.bo.buftype = "nofile" -- No file backing, won't complain about unsaved changes
-
-	-- Apply buffer-local keymaps
-	apply_buffer_local_keymaps(vim.api.nvim_get_current_buf())
-end
-
--- Function to open a new markdown buffer prefilled with help text from Node.js
-local function open_chatvim_help_window(args)
-	-- Generate a unique filename like "/path/to/cwd/chat-YYYY-MM-DD-HH-MM-SS.md"
-	local filename = vim.fn.getcwd() .. "/chat-" .. os.date("%Y-%m-%d-%H-%M-%S") .. ".md"
-
-	-- Determine window placement based on argument
-	local placement = args.args or ""
-	local split_cmd = ""
-
-	if placement == "left" then
-		split_cmd = "topleft vsplit"
-	elseif placement == "right" then
-		split_cmd = "botright vsplit"
-	elseif placement == "top" then
-		split_cmd = "topleft split"
-	elseif placement == "bottom" or placement == "bot" then
-		split_cmd = "botright split"
-	end
-
-	-- Open the split if specified
-	if split_cmd ~= "" then
-		vim.cmd(split_cmd)
-	end
-
-	-- Edit the new file in the target window (creates a new unsaved buffer with the filename)
-	vim.cmd("edit " .. vim.fn.fnameescape(filename))
-
-	-- Optional: Ensure filetype is markdown (usually auto-detected, but explicit for safety)
-	vim.bo.filetype = "markdown"
-
-	-- Apply buffer-local keymaps
-	apply_buffer_local_keymaps(vim.api.nvim_get_current_buf())
-
-	-- Get the current buffer (newly created)
 	local buf = vim.api.nvim_get_current_buf()
+	pcall(vim.api.nvim_buf_set_name, buf, "AI Chat")
+	vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+	vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+	vim.api.nvim_buf_set_option(buf, "swapfile", false)
+	-- Optional: Ensure filetype is markdown
+	vim.bo.filetype = "markdown"
 
-	-- Define path to the help.md file (in the same directory as this Lua file)
-	local plugin_dir = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
-	local help_path = plugin_dir .. "help.md"
+	-- Pre-populate front matter + first USER section
+	local default_model = "gemini-2.5-flash"
+	local initial_lines = {
+		"+++",
+		"model: " .. default_model,
+		"+++",
+		"",
+		"# === USER ===",
+		"",
+	}
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, initial_lines)
 
-	-- Read the contents of help.md
-	local output_lines = vim.fn.readfile(help_path)
-	-- add two lines at the end of the output
-	table.insert(output_lines, "")
-	table.insert(output_lines, "")
+	-- Apply buffer-local keymaps
+	apply_buffer_local_keymaps(buf)
 
-	-- Insert the contents into the buffer
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, output_lines)
+	-- Set initial winbar state to Ready (no active sessions)
+	set_winbar_for_buffer(buf, render_winbar_state("ready"))
 
-	-- Move cursor to the end of the content
-	local last_line = #output_lines
+	-- Position cursor at end of buffer so you can directly type a user message
+	local last_line = vim.api.nvim_buf_line_count(buf)
 	vim.api.nvim_win_set_cursor(0, { last_line, 0 })
-
-	-- Center the cursor at the bottom (equivalent to 'zz')
 	vim.cmd("normal! zz")
 end
 
@@ -896,35 +1011,6 @@ end, { desc = "Stop Gemini completion in current buffer" })
 vim.api.nvim_create_user_command("ChatvimStopAll", function()
 	require("chatvim").stop_all_completions()
 end, { desc = "Stop all active Gemini completions" })
-
-vim.api.nvim_create_user_command("ChatvimHelp", open_chatvim_help_window, {
-	nargs = "?", -- Accepts 0 or 1 argument
-	desc = "Open a new markdown buffer with help text in this window",
-})
-
-vim.api.nvim_create_user_command("ChatvimHelpLeft", function()
-	open_chatvim_help_window({ args = "left" })
-end, {
-	desc = "Open a new markdown buffer with help text in a left-side split",
-})
-
-vim.api.nvim_create_user_command("ChatvimHelpRight", function()
-	open_chatvim_help_window({ args = "right" })
-end, {
-	desc = "Open a new markdown buffer with help text in a right-side split",
-})
-
-vim.api.nvim_create_user_command("ChatvimHelpTop", function()
-	open_chatvim_help_window({ args = "top" })
-end, {
-	desc = "Open a new markdown buffer with help text in a top split",
-})
-
-vim.api.nvim_create_user_command("ChatvimHelpBottom", function()
-	open_chatvim_help_window({ args = "bottom" })
-end, {
-	desc = "Open a new markdown buffer with help text in a bottom split",
-})
 
 vim.api.nvim_create_user_command("ChatvimDebugRequest", function()
 	require("chatvim").debug_request()
@@ -971,13 +1057,6 @@ local function apply_keymaps()
 	map(p .. (new.right or "nr"), ":ChatvimNewRight<CR>", "Chatvim: New chat (right split)")
 	map(p .. (new.top or "nt"), ":ChatvimNewTop<CR>", "Chatvim: New chat (top split)")
 	map(p .. (new.bottom or "nb"), ":ChatvimNewBottom<CR>", "Chatvim: New chat (bottom split)")
-	-- Help
-	local help = km.help or {}
-	map(p .. (help.current or "hh"), ":ChatvimHelp<CR>", "Chatvim: Help (current window)")
-	map(p .. (help.left or "hl"), ":ChatvimHelpLeft<CR>", "Chatvim: Help (left split)")
-	map(p .. (help.right or "hr"), ":ChatvimHelpRight<CR>", "Chatvim: Help (right split)")
-	map(p .. (help.top or "ht"), ":ChatvimHelpTop<CR>", "Chatvim: Help (top split)")
-	map(p .. (help.bottom or "hb"), ":ChatvimHelpBottom<CR>", "Chatvim: Help (bottom split)")
 end
 
 -- Export functions for external use (like lualine)

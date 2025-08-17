@@ -26,6 +26,21 @@ is completely rewritten in pure Lua with no Node.js dependencies.
 Simply type a message into a markdown file in Neovim, and then run the `:ChatvimComplete`
 command to get a response from Google Gemini. The entire file content is sent as context.
 
+## Front Matter (Model Selection)
+
+You can select the Gemini model per chat file using a front matter block at the very top of the document:
+
+```
++++
+model: gemini-2.5-flash
++++
+```
+
+- When present, Chatvim will always use this model for the request.
+- This header is inserted automatically if missing when you run :ChatvimComplete. If you set the environment variable GEMINI_MODEL, that value is used; otherwise it defaults to gemini-2.5-flash.
+- The header is placed before the first USER marker. It is not sent as part of the chat content.
+- You can edit the model in the header and run completion again to switch models for that file.
+
 ## Chat Delimiters
 
 The plugin uses delimiters to separate different parts of the conversation:
@@ -94,6 +109,14 @@ Stops all active streaming responses across all buffers.
 (unsaved) markdown document in a new split window for a new chat session. If
 `direction` is not specified, it defaults to the current window.
 
+## Custom Winbar
+
+Chatvim sets a minimal winbar in chat buffers to reflect status:
+- [Waiting...] while a request is running
+- [Ready] when idle
+
+Both status indicators use the default foreground color.
+
 ## Optional Keybindings
 
 Keymaps are disabled by default. You can enable and customize them via setup and then apply them:
@@ -159,7 +182,7 @@ require('lualine').setup {
         function()
           return require('chatvim').get_status()
         end,
-        color = { fg = '#98be65' }, -- Optional: customize color
+        -- Uses default colors
       },
       'encoding', 
       'fileformat', 
